@@ -1,0 +1,307 @@
+Repository Content Extraction
+Generated on: SystemTime { tv_sec: 1734851436, tv_nsec: 172326000 }
+=================================================
+
+yon::prelude::*;
+use regex::Regex;
+use std::{
+    collections::HashSet,
+    fs::{self, File},
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Additional extensions to ignore (comma-separated, e.g., "txt,md,rs")
+    #[arg(short, long, value_delimiter = ',')]
+    ignore: Option<Vec<String>>,
+}
+
+struct RepoProcessor {
+    output_file: String,
+    ignored_dirs: HashSet<String>,
+    ignored_exts: HashSet<String>,
+    temp_dir: PathBuf,
+}
+
+impl RepoProcessor {
+    fn new(additional_ignores: Option<Vec<String>>) -> io::Result<Self> {
+        let temp_dir = tempfile::tempdir()?.into_path();
+
+        // Expand ignored directories to include more build-related dirs
+        let ignored_dirs: HashSet<String> = vec![
+            ".git",
+            ".svn",
+            "node_modules",
+            "vendor",
+            ".idea",
+            "target",
+            ".fingerprint",
+            "build",
+            "dist",
+            "out",
+            ".cargo",
+            ".rustup",
+            ".npm",
+            ".yarn",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        // Expand ignored extensions
+        let mut ignored_exts: HashSet<String> = vec![
+            // Config files
+            "env",
+            "log",
+            "gitignore",
+            "json",
+            "npmrc",
+            "prettierrc",
+            "eslintrc",
+            "babelrc",
+            "yml",
+            "yaml",
+            // Build artifacts and locks
+            "rlib",
+            "rmeta",
+            "d",
+            "pdb",
+            "ilk",
+            "exp",
+            "lib",
+            "lock",
+            // Rust-specific files
+            "rs.bk",
+            "rlib",
+            "rmeta",
+            "timestamp",
+            "fingerprint",
+            // Additional build artifacts
+            "o",
+            "a",
+            "so",
+            "dylib",
+            "dll",
+            "class",
+            "pyc",
+            // Dependencies and lock files
+            "lock",
+            "resolved",
+            "deps",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        // Add user-provided extensions if any
+        if let Some(additional) = additional_ignores {
+            for ext in additional {
+                let clean_ext = ext.trim_start_matches('.');
+                ignored_exts.insert(clean_ext.to_string());
+            }
+        }
+
+        Ok(Self {
+            output_file: "repo_content.txt".to_string(),
+            ignored_dirs,
+            ignored_exts,
+            temp_dir,
+        })
+    }
+
+    fn should_ignore_dir(&self, dir: &str) -> bool {
+        self.ignored_dirs.contains(dir)
+    }
+
+    fn should_ignore_ext(&self, file: &Path) -> bool {
+        // Ignore files without extensions
+        let extension = match file.extension() {
+            Some(ext) => ext.to_string_lossy().to_string(),
+            None => return true, // Ignore files without extensions
+        };
+
+        // Add binary file extensions to ignored list
+        let binary_exts = [
+            "jpg", "jpeg", "png", "gif", "bmp", "ico", "svg", "webp", "pdf", "zip", "tar", "gz",
+            "rar", "exe", "dll", "so", "o", "a", "pyc", "class", "jar", "war", "woff", "woff2",
+            "ttf", "eot", "pack", "xz", "7z", "bz2", "lz", "lzma", "lzo", "z", "deb", "rpm", "apk",
+            "ipa", "app", "dmg", "pkg", "pyo", "pyd",
+        ];
+
+        // Check if the extension is in either the binary_exts or the user-defined ignored_exts
+        binary_exts.contains(&extension.as_str()) || self.ignored_exts.contains(&extension)
+    }
+
+    fn collect_files(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+
+        if dir.is_dir() {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+
+                if path.is_dir() {
+                    if let Some(dirname) = path.file_name() {
+                        if !self.should_ignore_dir(&dirname.to_string_lossy()) {
+                            files.extend(self.collect_files(&path)?);
+                        }
+                    }
+                } else if path.is_file() {
+                    if let Some(filename) = path.file_name() {
+                        if !filename.to_string_lossy().starts_with("._")
+                            && !self.should_ignore_ext(&path)
+                        {
+                            files.push(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(files)
+    }
+
+    fn process_file(&self, file: &Path) -> io::Result<PathBuf> {
+        let hash = format!("{:x}", md5::compute(file.to_string_lossy().as_bytes()));
+        let outfile = self.temp_dir.join(format!("{}.txt", hash));
+
+        let mut writer = BufWriter::new(File::create(&outfile)?);
+
+        writeln!(writer, "===============================================")?;
+        writeln!(writer, "--- File: {} ---", file.display())?;
+        writeln!(writer, "===============================================")?;
+        writeln!(writer)?;
+
+        let content = fs::read_to_string(file)?;
+
+        // Replace binary data patterns
+        let binary_patterns = [
+            (
+                r#"(DATA = b""")[^"]*?(""")"#,
+                r#"$1<binary data removed>$2"#,
+            ),
+            (r#"(b85decode\().*?(\))"#, r#"$1"<binary data removed>"$2"#),
+            (
+                r#"(base64\.[^(]*decode\().*?(\))"#,
+                r#"$1"<binary data removed>"$2"#,
+            ),
+        ];
+
+        let processed_content =
+            binary_patterns
+                .iter()
+                .fold(content, |acc, (pattern, replacement)| {
+                    Regex::new(pattern)
+                        .unwrap()
+                        .replace_all(&acc, *replacement)
+                        .to_string()
+                });
+
+        write!(writer, "{}", processed_content)?;
+
+        writeln!(writer)?;
+        writeln!(writer, "--- End of File ---")?;
+        writeln!(writer)?;
+        writeln!(writer, "===============================================")?;
+
+        Ok(outfile)
+    }
+
+    pub fn process_repository(&self) -> io::Result<()> {
+        let mut output = BufWriter::new(File::create(&self.output_file)?);
+
+        writeln!(output, "Repository Content Extraction")?;
+        writeln!(output, "Generated on: {:?}", SystemTime::now())?;
+        writeln!(output, "=================================================")?;
+        writeln!(output)?;
+
+        println!("Collecting files...");
+        let files = self.collect_files(Path::new("."))?;
+        let total_files = files.len();
+
+        println!("Processing {} files...", total_files);
+        let processed_count = Arc::new(Mutex::new(0));
+        let output_mutex = Arc::new(Mutex::new(BufWriter::new(File::create(&self.output_file)?)));
+
+        // Process files in parallel using rayon's parallel iterator
+        files.par_iter().try_for_each(|file| -> io::Result<()> {
+            let count = {
+                let mut count = processed_count.lock().unwrap();
+                *count += 1;
+                *count
+            };
+
+            print!(
+                "\rProcessing file {} of {}: {}",
+                count,
+                total_files,
+                file.display()
+            );
+            io::stdout().flush()?;
+
+            let temp_file = self.process_file(file)?;
+            let content = fs::read_to_string(&temp_file)?;
+
+            // Write directly to the output file under lock
+            let mut output = output_mutex.lock().unwrap();
+            write!(output, "{}", content)?;
+
+            // Clean up temp file immediately
+            fs::remove_file(temp_file)?;
+
+            Ok(())
+        })?;
+
+        println!(
+            "\nFinished processing. Output saved to {}",
+            self.output_file
+        );
+
+        // Cleanup temp directory
+        fs::remove_dir_all(&self.temp_dir)?;
+
+        Ok(())
+    }
+}
+
+fn main() -> io::Result<()> {
+    let args = Args::parse();
+    let processor = RepoProcessor::new(args.ignore)?;
+    processor.process_repository()
+}
+
+--- End of File ---
+
+===============================================
+===============================================
+--- File: ./repo_content.txt ---
+===============================================
+
+
+--- End of File ---
+
+===============================================
+===============================================
+--- File: ./Cargo.toml ---
+===============================================
+
+[package]
+name = "repo_to_text"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+md5 = "0.7.0"
+rayon = "1.8"
+regex = "1.10"
+tempfile = "3.9"
+clap = { version = "4.4", features = ["derive"] }
+
+--- End of File ---
+
+===============================================
