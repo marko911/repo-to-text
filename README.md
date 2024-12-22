@@ -57,9 +57,38 @@ repo_to_text -i txt,md,conf
 
 ### Default Ignored Content
 
-- **Directories**: `.git`, `.svn`, `node_modules`, `vendor`, `.idea`
-- **File Extensions**: Common binary files (exe, dll, so), archives (zip, tar.gz), images (jpg, png), and various config files
-- **Special Files**: macOS `._` files, files without extensions
+- **Directories**:
+
+  - `.git`
+  - `.svn`
+  - `node_modules`
+  - `vendor`
+  - `.idea`
+  - `target`
+  - `dist`
+  - `build`
+  - `.next`
+  - `coverage`
+  - `__pycache__`
+  - `.pytest_cache`
+
+- **File Extensions**:
+
+  - Binary files: `exe`, `dll`, `so`, `dylib`, `bin`
+  - Archives: `zip`, `tar`, `gz`, `rar`, `7z`
+  - Images: `jpg`, `jpeg`, `png`, `gif`, `bmp`, `ico`, `svg`
+  - Audio/Video: `mp3`, `mp4`, `wav`, `avi`, `mov`
+  - Documents: `pdf`, `doc`, `docx`
+  - Database: `db`, `sqlite`, `sqlite3`
+  - Compiled: `pyc`, `class`, `o`
+  - Package files: `lock`, `sum`
+
+- **Special Files**:
+  - macOS system files (starting with `._`)
+  - Files without extensions
+  - `.DS_Store`
+  - `.env`
+  - `.log`
 
 ## Output Format
 
