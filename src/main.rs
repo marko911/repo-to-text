@@ -29,10 +29,11 @@ impl RepoProcessor {
     fn new(additional_ignores: Option<Vec<String>>) -> io::Result<Self> {
         let temp_dir = tempfile::tempdir()?.into_path();
 
-        let ignored_dirs: HashSet<String> = vec![".git", ".svn", "node_modules", "vendor", ".idea"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let mut ignored_dirs: HashSet<String> =
+            vec![".git", ".svn", "node_modules", "vendor", ".idea"]
+                .into_iter()
+                .map(String::from)
+                .collect();
 
         // Match the fish script's ignored extensions exactly
         let mut ignored_exts: HashSet<String> = vec![
@@ -99,9 +100,10 @@ impl RepoProcessor {
 
         // Add user-provided extensions if any
         if let Some(additional) = additional_ignores {
-            for ext in additional {
-                let clean_ext = ext.trim_start_matches('.');
-                ignored_exts.insert(clean_ext.to_string());
+            for item in additional {
+                let clean_item = item.trim_start_matches('.');
+                ignored_exts.insert(clean_item.to_string());
+                ignored_dirs.insert(clean_item.to_string());
             }
         }
 
