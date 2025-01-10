@@ -116,7 +116,8 @@ impl RepoProcessor {
     }
 
     fn should_ignore_dir(&self, dir: &str) -> bool {
-        self.ignored_dirs.contains(dir)
+        let dir_clean = dir.trim_start_matches('.');
+        self.ignored_dirs.contains(dir) || self.ignored_dirs.contains(dir_clean)
     }
 
     fn should_ignore_ext(&self, file: &Path) -> bool {
