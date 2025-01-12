@@ -13,8 +13,8 @@ use std::{
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Additional extensions to ignore (comma-separated, e.g., "txt,md,rs")
-    #[arg(short, long, value_delimiter = ',')]
+    /// Additional items to ignore (both directories and file extensions). Can be space or comma separated.
+    #[arg(short, long, value_delimiter = ',', num_args = 1..)]
     ignore: Option<Vec<String>>,
 }
 
