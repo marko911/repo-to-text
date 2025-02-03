@@ -1,4 +1,5 @@
 use clap::Parser;
+use dialoguer::{theme::ColorfulTheme, MultiSelect};
 use rayon::prelude::*;
 use regex::Regex;
 use std::{
@@ -23,6 +24,8 @@ struct RepoProcessor {
     ignored_dirs: HashSet<String>,
     ignored_exts: HashSet<String>,
     temp_dir: PathBuf,
+    large_files: Arc<Mutex<Vec<(PathBuf, u64)>>>,
+    size_threshold: u64,
 }
 
 impl RepoProcessor {
@@ -93,6 +96,13 @@ impl RepoProcessor {
             "svg",
             "webp",
             "pdf",
+            "bcmap", // Binary CMap files for PDF/font processing
+            "pfb",   // Printer Font Binary
+            "pfm",   // Printer Font Metrics
+            "afm",   // Adobe Font Metrics
+            "otf",   // OpenType Font
+            "cff",   // Compact Font Format
+            "fon",   // Legacy Windows Font format
         ]
         .into_iter()
         .map(String::from)
@@ -112,6 +122,8 @@ impl RepoProcessor {
             ignored_dirs,
             ignored_exts,
             temp_dir,
+            large_files: Arc::new(Mutex::new(Vec::new())),
+            size_threshold: 1024 * 1024, // 1MB in bytes
         })
     }
 
@@ -146,6 +158,7 @@ impl RepoProcessor {
 
     fn collect_files(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
         let mut files = Vec::new();
+        let mut large_files = Vec::new();
 
         if dir.is_dir() {
             for entry in fs::read_dir(dir)? {
@@ -163,11 +176,23 @@ impl RepoProcessor {
                         if !filename.to_string_lossy().starts_with("._")
                             && !self.should_ignore_ext(&path)
                         {
+                            // Check file size
+                            if let Ok(metadata) = path.metadata() {
+                                let size = metadata.len();
+                                if size > self.size_threshold {
+                                    large_files.push((path.clone(), size));
+                                }
+                            }
                             files.push(path);
                         }
                     }
                 }
             }
+        }
+
+        // Store large files in the struct
+        if !large_files.is_empty() {
+            self.large_files.lock().unwrap().extend(large_files);
         }
 
         Ok(files)
@@ -225,6 +250,99 @@ impl RepoProcessor {
         Ok(outfile)
     }
 
+    fn prompt_large_files(&self, files: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+        if self.large_files.lock().unwrap().is_empty() {
+            return Ok(files.to_vec());
+        }
+
+        println!("\nFound large files (>1MB). Use ↑↓ to navigate, Y/N to select, Enter when done:");
+        let items: Vec<String> = self
+            .large_files
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, size)| {
+                format!(
+                    "{} ({:.2}MB)",
+                    path.display(),
+                    *size as f64 / (1024.0 * 1024.0)
+                )
+            })
+            .collect();
+
+        let theme = ColorfulTheme::default();
+        let mut current_selection = vec![true; items.len()];
+        let mut current_index = 0;
+
+        loop {
+            // Clear screen and show current state
+            print!("\x1B[2J\x1B[1;1H");
+            println!("Select files to include (Y/N for current item, ↑↓ to navigate, Enter to finish):\n");
+
+            for (idx, item) in items.iter().enumerate() {
+                let prefix = if idx == current_index { ">" } else { " " };
+                let status = if current_selection[idx] { "Y" } else { "N" };
+                println!("{} [{}] {}", prefix, status, item);
+            }
+
+            // Get user input
+            if let Ok(key) = dialoguer::console::Term::stdout().read_key() {
+                match key {
+                    dialoguer::console::Key::Char('y') | dialoguer::console::Key::Char('Y') => {
+                        current_selection[current_index] = true;
+                        if current_index < items.len() - 1 {
+                            current_index += 1;
+                        }
+                    }
+                    dialoguer::console::Key::Char('n') | dialoguer::console::Key::Char('N') => {
+                        current_selection[current_index] = false;
+                        if current_index < items.len() - 1 {
+                            current_index += 1;
+                        }
+                    }
+                    dialoguer::console::Key::ArrowUp if current_index > 0 => {
+                        current_index -= 1;
+                    }
+                    dialoguer::console::Key::ArrowDown if current_index < items.len() - 1 => {
+                        current_index += 1;
+                    }
+                    dialoguer::console::Key::Enter => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let selected_paths: HashSet<_> = self
+            .large_files
+            .lock()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| current_selection[*i])
+            .map(|(_, (path, _))| path.clone())
+            .collect();
+
+        Ok(files
+            .iter()
+            .filter(|f| {
+                if self
+                    .large_files
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(p, _)| p == *f)
+                {
+                    selected_paths.contains(*f)
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect())
+    }
+
     pub fn process_repository(&self) -> io::Result<()> {
         let mut output = BufWriter::new(File::create(&self.output_file)?);
 
@@ -235,40 +353,45 @@ impl RepoProcessor {
 
         println!("Collecting files...");
         let files = self.collect_files(Path::new("."))?;
-        let total_files = files.len();
+
+        // Prompt for large files before processing
+        let files_to_process = self.prompt_large_files(&files)?;
+        let total_files = files_to_process.len();
 
         println!("Processing {} files...", total_files);
         let processed_count = Arc::new(Mutex::new(0));
         let output_mutex = Arc::new(Mutex::new(BufWriter::new(File::create(&self.output_file)?)));
 
         // Process files in parallel using rayon's parallel iterator
-        files.par_iter().try_for_each(|file| -> io::Result<()> {
-            let count = {
-                let mut count = processed_count.lock().unwrap();
-                *count += 1;
-                *count
-            };
+        files_to_process
+            .par_iter()
+            .try_for_each(|file| -> io::Result<()> {
+                let count = {
+                    let mut count = processed_count.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
 
-            print!(
-                "\rProcessing file {} of {}: {}",
-                count,
-                total_files,
-                file.display()
-            );
-            io::stdout().flush()?;
+                print!(
+                    "\rProcessing file {} of {}: {}",
+                    count,
+                    total_files,
+                    file.display()
+                );
+                io::stdout().flush()?;
 
-            let temp_file = self.process_file(file)?;
-            let content = fs::read_to_string(&temp_file)?;
+                let temp_file = self.process_file(file)?;
+                let content = fs::read_to_string(&temp_file)?;
 
-            // Write directly to the output file under lock
-            let mut output = output_mutex.lock().unwrap();
-            write!(output, "{}", content)?;
+                // Write directly to the output file under lock
+                let mut output = output_mutex.lock().unwrap();
+                write!(output, "{}", content)?;
 
-            // Clean up temp file immediately
-            fs::remove_file(temp_file)?;
+                // Clean up temp file immediately
+                fs::remove_file(temp_file)?;
 
-            Ok(())
-        })?;
+                Ok(())
+            })?;
 
         println!(
             "\nFinished processing. Output saved to {}",
