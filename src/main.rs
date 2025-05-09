@@ -40,6 +40,7 @@ impl RepoProcessor {
 
         // Match the fish script's ignored extensions exactly
         let mut ignored_exts: HashSet<String> = vec![
+            "lock",
             "pack",
             "xz",
             "7z",
@@ -136,7 +137,7 @@ impl RepoProcessor {
     fn should_ignore_ext(&self, file: &Path) -> bool {
         let filename = file
             .file_name()
-            .map(|f| f.to_string_lossy().to_string())
+            .map(|f| f.to_string_lossy())
             .unwrap_or_default();
 
         // Check if file has no extension
@@ -144,13 +145,13 @@ impl RepoProcessor {
             return true;
         }
 
-        // Check for .so.* pattern
-        if filename.contains(".so.") {
+        // Check for .so.* pattern (case-insensitive)
+        if filename.to_lowercase().contains(".so.") {
             return true;
         }
 
         let extension = match file.extension() {
-            Some(ext) => ext.to_string_lossy().to_string(),
+            Some(ext) => ext.to_string_lossy().to_string().to_lowercase(),
             None => return true,
         };
 
