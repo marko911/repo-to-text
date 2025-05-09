@@ -62,6 +62,7 @@ impl RepoProcessor {
             "pkg",
             "exe",
             "dll",
+            "csv",
             "so",
             "o",
             "a",
