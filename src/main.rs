@@ -33,7 +33,7 @@ impl RepoProcessor {
         let temp_dir = tempfile::tempdir()?.into_path();
 
         let mut ignored_dirs: HashSet<String> =
-            vec![".git", ".svn", "node_modules", "vendor", ".idea"]
+            vec![".git", ".svn", "node_modules", "vendor", ".idea", ".target"]
                 .into_iter()
                 .map(String::from)
                 .collect();
