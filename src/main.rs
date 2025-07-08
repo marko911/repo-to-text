@@ -1,5 +1,6 @@
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, MultiSelect};
+use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
 use regex::Regex;
 use std::{
@@ -10,6 +11,7 @@ use std::{
     sync::{Arc, Mutex},
     time::SystemTime,
 };
+use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -17,6 +19,9 @@ struct Args {
     /// Additional items to ignore (both directories and file extensions). Can be space or comma separated.
     #[arg(short, long, value_delimiter = ',', num_args = 1..)]
     ignore: Option<Vec<String>>,
+    /// File extensions to explicitly include (override default ignored extensions). Can be space or comma separated.
+    #[arg(short = 'I', long, value_delimiter = ',', num_args = 1..)]
+    include: Option<Vec<String>>,
 }
 
 struct RepoProcessor {
@@ -29,7 +34,10 @@ struct RepoProcessor {
 }
 
 impl RepoProcessor {
-    fn new(additional_ignores: Option<Vec<String>>) -> io::Result<Self> {
+    fn new(
+        additional_ignores: Option<Vec<String>>,
+        include_exts: Option<Vec<String>>,
+    ) -> io::Result<Self> {
         let temp_dir = tempfile::tempdir()?.into_path();
 
         let mut ignored_dirs: HashSet<String> =
@@ -110,12 +118,24 @@ impl RepoProcessor {
         .map(String::from)
         .collect();
 
-        // Add user-provided extensions if any
+        // Add user-provided extensions to ignore, if any
         if let Some(additional) = additional_ignores {
             for item in additional {
                 let clean_item = item.trim_start_matches('.');
                 ignored_exts.insert(clean_item.to_string());
                 ignored_dirs.insert(clean_item.to_string());
+            }
+        }
+
+        // Remove explicitly included extensions from the ignored set
+        if let Some(includes) = include_exts {
+            for item in includes {
+                let clean_item = item.trim_start_matches('.');
+                let clean_item_lower = clean_item.to_lowercase();
+                ignored_exts.remove(clean_item);
+                ignored_exts.remove(&clean_item_lower);
+                ignored_dirs.remove(clean_item);
+                ignored_dirs.remove(&clean_item_lower);
             }
         }
 
@@ -159,43 +179,50 @@ impl RepoProcessor {
     }
 
     fn collect_files(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
-        let mut files = Vec::new();
-        let mut large_files = Vec::new();
-
-        if dir.is_dir() {
-            for entry in fs::read_dir(dir)? {
-                let entry = entry?;
+        let files: Vec<PathBuf> = WalkDir::new(dir)
+            .into_iter()
+            // Skip entries whose parent directories are in the ignored list
+            .filter_entry(|entry| {
                 let path = entry.path();
-
                 if path.is_dir() {
                     if let Some(dirname) = path.file_name() {
-                        if !self.should_ignore_dir(&dirname.to_string_lossy()) {
-                            files.extend(self.collect_files(&path)?);
-                        }
-                    }
-                } else if path.is_file() {
-                    if let Some(filename) = path.file_name() {
-                        if !filename.to_string_lossy().starts_with("._")
-                            && !self.should_ignore_ext(&path)
-                        {
-                            // Check file size
-                            if let Ok(metadata) = path.metadata() {
-                                let size = metadata.len();
-                                if size > self.size_threshold {
-                                    large_files.push((path.clone(), size));
-                                }
-                            }
-                            files.push(path);
-                        }
+                        return !self.should_ignore_dir(&dirname.to_string_lossy());
                     }
                 }
-            }
-        }
+                true
+            })
+            // Convert the iterator to a parallel iterator
+            .par_bridge()
+            .filter_map(|entry| match entry {
+                Ok(e) => {
+                    let path = e.into_path();
 
-        // Store large files in the struct
-        if !large_files.is_empty() {
-            self.large_files.lock().unwrap().extend(large_files);
-        }
+                    if !path.is_file() {
+                        return None;
+                    }
+
+                    // Skip unwanted files
+                    if let Some(filename) = path.file_name() {
+                        if filename.to_string_lossy().starts_with("._")
+                            || self.should_ignore_ext(&path)
+                        {
+                            return None;
+                        }
+                    }
+
+                    // Track large files
+                    if let Ok(metadata) = path.metadata() {
+                        let size = metadata.len();
+                        if size > self.size_threshold {
+                            self.large_files.lock().unwrap().push((path.clone(), size));
+                        }
+                    }
+
+                    Some(path)
+                }
+                Err(_) => None,
+            })
+            .collect();
 
         Ok(files)
     }
@@ -409,6 +436,6 @@ impl RepoProcessor {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let processor = RepoProcessor::new(args.ignore)?;
+    let processor = RepoProcessor::new(args.ignore, args.include)?;
     processor.process_repository()
 }

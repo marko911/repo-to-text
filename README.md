@@ -55,67 +55,27 @@ repo_to_text --ignore txt,md,conf
 repo_to_text -i txt,md,conf
 ```
 
+### Including Extensions That Are Ignored by Default
+
+If you need to _keep_ certain extensions that the tool normally skips (e.g. `json`, `yaml`) you can pass them with the `--include` flag.
+
+```bash
+# Process everything, but make sure .json and .yaml files are included
+repo_to_text --include json,yaml
+
+# Short form
+repo_to_text -I json,yaml
+
+# Combine with --ignore to fine-tune behaviour
+repo_to_text --ignore log,tmp --include json
+```
+
+The list passed to `--include` takes precedence over both the built-in ignore list and any extensions provided through `--ignore`.
+
 ### Default Ignored Content
 
 - **Directories**:
 
   - `.git`
   - `.svn`
-  - `node_modules`
-  - `vendor`
-  - `.idea`
-  - `target`
-  - `dist`
-  - `build`
-  - `.next`
-  - `coverage`
-  - `__pycache__`
-  - `.pytest_cache`
-
-- **File Extensions**:
-
-  - Binary files: `exe`, `dll`, `so`, `dylib`, `bin`
-  - Archives: `zip`, `tar`, `gz`, `rar`, `7z`
-  - Images: `jpg`, `jpeg`, `png`, `gif`, `bmp`, `ico`, `svg`
-  - Audio/Video: `mp3`, `mp4`, `wav`, `avi`, `mov`
-  - Documents: `pdf`, `doc`, `docx`
-  - Database: `db`, `sqlite`, `sqlite3`
-  - Compiled: `pyc`, `class`, `o`
-  - Package files: `lock`, `sum`
-
-- **Special Files**:
-  - macOS system files (starting with `._`)
-  - Files without extensions
-  - `.DS_Store`
-  - `.env`
-  - `.log`
-
-## Output Format
-
-The generated `repo_content.txt` file follows this format:
-
-```
-Repository Content Extraction
-Generated on: 2024-12-22 08:13:01
-
-===============================================
---- File: src/main.rs ---
-===============================================
-[file content here]
---- End of File ---
-===============================================
-```
-
-## Use Cases
-
-- Training custom LLMs on your codebase
-- Creating context for LLM prompts
-- Code analysis and documentation
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+  - `
