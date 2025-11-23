@@ -1,5 +1,4 @@
 use clap::Parser;
-use dialoguer::{theme::ColorfulTheme, MultiSelect};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
 use regex::Regex;
@@ -13,13 +12,208 @@ use std::{
 };
 use walkdir::WalkDir;
 
+const DEFAULT_ALLOWED_EXTS: &[&str] = &[
+    "ada",
+    "adb",
+    "ads",
+    "apex",
+    "as",
+    "asm",
+    "astro",
+    "bas",
+    "bat",
+    "c",
+    "cc",
+    "cbl",
+    "cl",
+    "clj",
+    "cljc",
+    "cljs",
+    "cls",
+    "cmake",
+    "coffee",
+    "cr",
+    "cs",
+    "cshtml",
+    "csh",
+    "css",
+    "cue",
+    "cxx",
+    "d",
+    "dart",
+    "edn",
+    "elm",
+    "erl",
+    "ex",
+    "exs",
+    "fs",
+    "fsi",
+    "fsx",
+    "fsscript",
+    "f",
+    "f03",
+    "f08",
+    "f77",
+    "f90",
+    "f95",
+    "gd",
+    "gemspec",
+    "gleam",
+    "glsl",
+    "go",
+    "gradle",
+    "graphql",
+    "gql",
+    "groovy",
+    "gvy",
+    "h",
+    "handlebars",
+    "hbs",
+    "hh",
+    "hpp",
+    "hs",
+    "hx",
+    "hxx",
+    "htm",
+    "html",
+    "hrl",
+    "hcl",
+    "ipynb",
+    "java",
+    "jl",
+    "js",
+    "jsx",
+    "json",
+    "kql",
+    "kt",
+    "kts",
+    "less",
+    "liquid",
+    "lua",
+    "m",
+    "mm",
+    "ml",
+    "mli",
+    "mjs",
+    "move",
+    "nim",
+    "nix",
+    "odin",
+    "php",
+    "phtml",
+    "pl",
+    "pm",
+    "proto",
+    "ps1",
+    "psm1",
+    "pug",
+    "purs",
+    "py",
+    "pyi",
+    "pyx",
+    "q",
+    "r",
+    "rb",
+    "rego",
+    "rs",
+    "s",
+    "sass",
+    "scala",
+    "sbt",
+    "scm",
+    "scss",
+    "sh",
+    "slim",
+    "sol",
+    "sql",
+    "styl",
+    "svelte",
+    "swift",
+    "tcl",
+    "tf",
+    "tfvars",
+    "thrift",
+    "ts",
+    "tsx",
+    "twig",
+    "v",
+    "vb",
+    "vba",
+    "vbs",
+    "vh",
+    "vue",
+    "wgsl",
+    "xml",
+    "zig",
+    "zsh",
+];
+
+const DEFAULT_IGNORED_DIRS: &[&str] = &[
+    "__pycache__",
+    "__snapshots__",
+    "_build",
+    "_output",
+    "angular",
+    "bazel-bin",
+    "bazel-out",
+    "bazel-testlogs",
+    "bin",
+    "bower_components",
+    "build",
+    "buck-out",
+    "cache",
+    "cmake-build-debug",
+    "cmake-build-release",
+    "coverage",
+    "dart_tool",
+    "debug",
+    "deriveddata",
+    "dist",
+    "env",
+    "git",
+    "gradle",
+    "hg",
+    "jspm_packages",
+    "logs",
+    "m2",
+    "mypy_cache",
+    "next",
+    "node_modules",
+    "nuxt",
+    "obj",
+    "out",
+    "output",
+    "parcel-cache",
+    "pnpm-store",
+    "pods",
+    "pytest_cache",
+    "release",
+    "reports",
+    "ruff_cache",
+    "serverless",
+    "storybook-static",
+    "svelte-kit",
+    "svn",
+    "target",
+    "temp",
+    "terraform",
+    "tmp",
+    "vendor",
+    "venv",
+    "vercel",
+    "vs",
+    "vscode",
+    "yarn",
+    "yarn_cache",
+];
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Additional items to ignore (both directories and file extensions). Can be space or comma separated.
+    /// Extra directories or extensions to ignore even if they would normally be included. Can be space or comma separated.
     #[arg(short, long, value_delimiter = ',', num_args = 1..)]
     ignore: Option<Vec<String>>,
-    /// File extensions to explicitly include (override default ignored extensions). Can be space or comma separated.
+    /// Additional file extensions to include beyond the default list of programming languages. Can be space or comma separated.
     #[arg(short = 'I', long, value_delimiter = ',', num_args = 1..)]
     include: Option<Vec<String>>,
 }
@@ -27,7 +221,7 @@ struct Args {
 struct RepoProcessor {
     output_file: String,
     ignored_dirs: HashSet<String>,
-    ignored_exts: HashSet<String>,
+    allowed_exts: HashSet<String>,
     temp_dir: PathBuf,
     large_files: Arc<Mutex<Vec<(PathBuf, u64)>>>,
     size_threshold: u64,
@@ -40,109 +234,50 @@ impl RepoProcessor {
     ) -> io::Result<Self> {
         let temp_dir = tempfile::tempdir()?.into_path();
 
-        let mut ignored_dirs: HashSet<String> =
-            vec!["git", "svn", "node_modules", "vendor", "idea", "target"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+        let mut ignored_dirs: HashSet<String> = DEFAULT_IGNORED_DIRS
+            .iter()
+            .map(|d| d.trim_start_matches('.').to_lowercase())
+            .collect();
 
-        // Match the fish script's ignored extensions exactly
-        let mut ignored_exts: HashSet<String> = vec![
-            "lock",
-            "pack",
-            "xz",
-            "7z",
-            "bz2",
-            "gz",
-            "lz",
-            "lzma",
-            "lzo",
-            "rar",
-            "tar",
-            "xz",
-            "z",
-            "zip",
-            "deb",
-            "rpm",
-            "apk",
-            "ipa",
-            "app",
-            "dmg",
-            "pkg",
-            "exe",
-            "dll",
-            "csv",
-            "so",
-            "o",
-            "a",
-            "pyc",
-            "class",
-            "jar",
-            "war",
-            "woff",
-            "woff2",
-            "ttf",
-            "eot",
-            "env",
-            "log",
-            "gitignore",
-            "json",
-            "npmrc",
-            "prettierrc",
-            "eslintrc",
-            "babelrc",
-            "pyc",
-            "pyo",
-            "pyd",
-            "class",
-            "yml",
-            "yaml",
-            "jpg",
-            "jpeg",
-            "png",
-            "gif",
-            "bmp",
-            "ico",
-            "svg",
-            "webp",
-            "pdf",
-            "bcmap", // Binary CMap files for PDF/font processing
-            "pfb",   // Printer Font Binary
-            "pfm",   // Printer Font Metrics
-            "afm",   // Adobe Font Metrics
-            "otf",   // OpenType Font
-            "cff",   // Compact Font Format
-            "fon",   // Legacy Windows Font format
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let mut allowed_exts: HashSet<String> = DEFAULT_ALLOWED_EXTS
+            .iter()
+            .map(|ext| ext.trim_start_matches('.').to_lowercase())
+            .collect();
 
         // Add user-provided extensions to ignore, if any
         if let Some(additional) = additional_ignores {
             for item in additional {
-                let clean_item = item.trim_start_matches('.');
-                ignored_exts.insert(clean_item.to_string());
-                ignored_dirs.insert(clean_item.to_string());
+                let cleaned = item.trim();
+                if cleaned.is_empty() {
+                    continue;
+                }
+
+                let dir_name = cleaned.trim_start_matches('.').to_lowercase();
+                if !dir_name.is_empty() {
+                    ignored_dirs.insert(dir_name.clone());
+                    allowed_exts.remove(&dir_name);
+                }
             }
         }
 
-        // Remove explicitly included extensions from the ignored set
         if let Some(includes) = include_exts {
             for item in includes {
-                let clean_item = item.trim_start_matches('.');
-                let clean_item_lower = clean_item.to_lowercase();
-                ignored_exts.remove(clean_item);
-                ignored_exts.remove(&clean_item_lower);
-                ignored_dirs.remove(clean_item);
-                ignored_dirs.remove(&clean_item_lower);
+                let cleaned = item.trim();
+                if cleaned.is_empty() {
+                    continue;
+                }
+
+                let ext = cleaned.trim_start_matches('.').to_lowercase();
+                if !ext.is_empty() {
+                    allowed_exts.insert(ext);
+                }
             }
         }
 
         Ok(Self {
             output_file: "repo_content.txt".to_string(),
             ignored_dirs,
-            ignored_exts,
+            allowed_exts,
             temp_dir,
             large_files: Arc::new(Mutex::new(Vec::new())),
             size_threshold: 1024 * 1024, // 1MB in bytes
@@ -150,8 +285,9 @@ impl RepoProcessor {
     }
 
     fn should_ignore_dir(&self, dir: &str) -> bool {
-        let dir_clean = dir.trim_start_matches('.');
-        self.ignored_dirs.contains(dir) || self.ignored_dirs.contains(dir_clean)
+        let dir_lower = dir.to_lowercase();
+        let dir_clean = dir_lower.trim_start_matches('.');
+        self.ignored_dirs.contains(dir_clean)
     }
 
     fn should_ignore_ext(&self, file: &Path) -> bool {
@@ -175,7 +311,11 @@ impl RepoProcessor {
             None => return true,
         };
 
-        self.ignored_exts.contains(&extension)
+        if extension.is_empty() {
+            return true;
+        }
+
+        !self.allowed_exts.contains(&extension)
     }
 
     fn collect_files(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -299,7 +439,6 @@ impl RepoProcessor {
             })
             .collect();
 
-        let theme = ColorfulTheme::default();
         let mut current_selection = vec![true; items.len()];
         let mut current_index = 0;
 
