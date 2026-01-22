@@ -2,8 +2,10 @@ use clap::Parser;
 use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
+    env,
     fs::{self, File},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
@@ -207,6 +209,221 @@ const DEFAULT_IGNORED_DIRS: &[&str] = &[
     "yarn_cache",
 ];
 
+// Groq API structures
+#[derive(Serialize)]
+struct GroqMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct GroqRequest {
+    messages: Vec<GroqMessage>,
+    model: String,
+    temperature: f32,
+    max_completion_tokens: u32,
+    top_p: f32,
+    stream: bool,
+    reasoning_effort: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct GroqStreamChoice {
+    delta: GroqDelta,
+}
+
+#[derive(Deserialize, Debug)]
+struct GroqDelta {
+    content: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GroqStreamResponse {
+    choices: Vec<GroqStreamChoice>,
+}
+
+/// Directories to skip during the initial scan (these are almost always noise)
+const SCAN_SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    ".hg",
+    ".svn",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "env",
+    ".env",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    "vendor",
+    ".cargo",
+    "deps",
+    ".deps",
+];
+
+/// Scans a directory and collects all unique file extensions and directory names
+/// Only scans top 3 levels and skips known dependency/build directories
+fn collect_extensions_and_dirs(dir: &Path) -> (HashSet<String>, HashSet<String>) {
+    let mut extensions: HashSet<String> = HashSet::new();
+    let mut directories: HashSet<String> = HashSet::new();
+
+    let skip_dirs: HashSet<&str> = SCAN_SKIP_DIRS.iter().copied().collect();
+
+    for entry in WalkDir::new(dir)
+        .max_depth(3) // Only scan top 3 levels
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip known problematic directories
+            if e.file_type().is_dir() {
+                if let Some(name) = e.file_name().to_str() {
+                    let name_lower = name.to_lowercase();
+                    return !skip_dirs.contains(name_lower.as_str());
+                }
+            }
+            true
+        })
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.is_dir() {
+            if let Some(dirname) = path.file_name() {
+                let name = dirname.to_string_lossy().to_lowercase();
+                // Skip hidden directories from collection (but we still add them for AI to consider)
+                if !name.is_empty() {
+                    directories.insert(name);
+                }
+            }
+        } else if path.is_file() {
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy().to_lowercase();
+                if !ext_str.is_empty() {
+                    extensions.insert(ext_str);
+                }
+            }
+        }
+    }
+
+    (extensions, directories)
+}
+
+/// Calls the Groq LLM API to get suggestions for what to ignore
+fn get_ai_ignore_suggestions(
+    extensions: &HashSet<String>,
+    directories: &HashSet<String>,
+) -> io::Result<Vec<String>> {
+    let api_key = match env::var("GROQ_API_KEY") {
+        Ok(key) => key,
+        Err(_) => {
+            eprintln!("Warning: GROQ_API_KEY not set, skipping AI-powered ignore suggestions");
+            return Ok(vec![]);
+        }
+    };
+
+    // Build the list of items to send to the LLM
+    let mut items: Vec<String> = Vec::new();
+
+    for ext in extensions {
+        items.push(format!(".{}", ext));
+    }
+    for dir in directories {
+        items.push(dir.clone());
+    }
+
+    if items.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let prompt = format!(
+        "I am filtering a codebase with the following directories and file extensions for only files that are useful in understanding the function of the application. Which of these should I ignore? Send only a JSON array of strings back and nothing else.\n\n{}",
+        items.join(", ")
+    );
+
+    println!("Asking AI for smart ignore suggestions...");
+
+    let client = reqwest::blocking::Client::new();
+
+    let request = GroqRequest {
+        messages: vec![GroqMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }],
+        model: "qwen/qwen3-32b".to_string(),
+        temperature: 0.6,
+        max_completion_tokens: 4096,
+        top_p: 0.95,
+        stream: true,
+        reasoning_effort: "default".to_string(),
+    };
+
+    let response = client
+        .post("https://api.groq.com/openai/v1/chat/completions")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&request)
+        .send()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("HTTP request failed: {}", e)))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Groq API error ({}): {}", status, body),
+        ));
+    }
+
+    // Process streaming response
+    let mut full_content = String::new();
+
+    for line in response.text().unwrap_or_default().lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "data: [DONE]" {
+            continue;
+        }
+
+        if let Some(json_str) = line.strip_prefix("data: ") {
+            if let Ok(stream_response) = serde_json::from_str::<GroqStreamResponse>(json_str) {
+                for choice in stream_response.choices {
+                    if let Some(content) = choice.delta.content {
+                        full_content.push_str(&content);
+                    }
+                }
+            }
+        }
+    }
+
+    // Parse the JSON array from the response
+    // First, try to extract JSON array from the response (it might have extra text)
+    let json_start = full_content.find('[');
+    let json_end = full_content.rfind(']');
+
+    let suggestions: Vec<String> = match (json_start, json_end) {
+        (Some(start), Some(end)) if end > start => {
+            let json_str = &full_content[start..=end];
+            serde_json::from_str(json_str).unwrap_or_else(|e| {
+                eprintln!("Warning: Failed to parse AI response as JSON: {}", e);
+                eprintln!("Response was: {}", full_content);
+                vec![]
+            })
+        }
+        _ => {
+            eprintln!("Warning: Could not find JSON array in AI response");
+            eprintln!("Response was: {}", full_content);
+            vec![]
+        }
+    };
+
+    if !suggestions.is_empty() {
+        println!("AI suggests ignoring: {:?}", suggestions);
+    }
+
+    Ok(suggestions)
+}
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -216,6 +433,9 @@ struct Args {
     /// Additional file extensions to include beyond the default list of programming languages. Can be space or comma separated.
     #[arg(short = 'I', long, value_delimiter = ',', num_args = 1..)]
     include: Option<Vec<String>>,
+    /// Disable AI-powered ignore suggestions (requires GROQ_API_KEY env var when enabled)
+    #[arg(long)]
+    no_ai: bool,
 }
 
 struct RepoProcessor {
@@ -575,6 +795,36 @@ impl RepoProcessor {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let processor = RepoProcessor::new(args.ignore, args.include)?;
+
+    // Determine ignore patterns
+    let ignore_patterns = if args.ignore.is_some() {
+        // User provided explicit ignores, use those
+        args.ignore
+    } else if !args.no_ai {
+        // No explicit ignores and AI is enabled, get suggestions
+        let target_dir = Path::new(".");
+        println!("Scanning directory for extensions and folders...");
+        let (extensions, directories) = collect_extensions_and_dirs(target_dir);
+
+        println!(
+            "Found {} unique extensions and {} directories",
+            extensions.len(),
+            directories.len()
+        );
+
+        match get_ai_ignore_suggestions(&extensions, &directories) {
+            Ok(suggestions) if !suggestions.is_empty() => Some(suggestions),
+            Ok(_) => None,
+            Err(e) => {
+                eprintln!("Warning: AI suggestion failed: {}", e);
+                None
+            }
+        }
+    } else {
+        // AI is disabled and no explicit ignores
+        None
+    };
+
+    let processor = RepoProcessor::new(ignore_patterns, args.include)?;
     processor.process_repository()
 }
